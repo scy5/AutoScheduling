@@ -46,6 +46,8 @@ def load_config():
                     doctor["next_shift_date"] = None
                 if "shift_interval" not in doctor:
                     doctor["shift_interval"] = 0
+                if "clinic_day" not in doctor:
+                    doctor["clinic_day"] = ""
             return config.get("doctor_data", [])
     return []
 
@@ -58,7 +60,7 @@ def save_config():
 def load_doctors_to_listbox():
     doctor_listbox.delete(0, tk.END)
     for doctor in doctor_data:
-        doctor_listbox.insert(tk.END, f"{doctor['name']} - 状态: {doctor['status']}, 公休: {doctor['public_holiday']}, 积休: {doctor['accumulated_holiday']}")
+        doctor_listbox.insert(tk.END, f"{doctor['name']} - 状态: {doctor['status']}, 公休: {doctor['public_holiday']}, 积休: {doctor['accumulated_holiday']}, 门诊日: {doctor['clinic_day']}")
 
 # 添加医生
 def add_doctor():
@@ -68,6 +70,7 @@ def add_doctor():
     accumulated_holiday = int(accumulated_holiday_entry.get())
     next_shift_date = next_shift_date_entry.get_date()
     shift_interval = int(shift_interval_entry.get().strip())
+    clinic_day = doctor_clinic_day_var.get()
 
     if name and not any(d['name'] == name for d in doctor_data):
         doctor_data.append({
@@ -76,7 +79,8 @@ def add_doctor():
             "public_holiday": public_holiday,
             "accumulated_holiday": accumulated_holiday,
             "next_shift_date": next_shift_date.strftime('%Y-%m-%d'),
-            "shift_interval": shift_interval
+            "shift_interval": shift_interval,
+            "clinic_day": clinic_day
         })
         load_doctors_to_listbox()
         save_config()
@@ -97,6 +101,7 @@ def modify_doctor():
     accumulated_holiday = int(accumulated_holiday_entry.get())
     next_shift_date = next_shift_date_entry.get_date()
     shift_interval = int(shift_interval_entry.get().strip())
+    clinic_day = doctor_clinic_day_var.get()
 
     if name and (name == doctor_data[index]['name'] or not any(d['name'] == name for d in doctor_data)):
         doctor_data[index] = {
@@ -105,7 +110,8 @@ def modify_doctor():
             "public_holiday": public_holiday,
             "accumulated_holiday": accumulated_holiday,
             "next_shift_date": next_shift_date.strftime('%Y-%m-%d'),
-            "shift_interval": shift_interval
+            "shift_interval": shift_interval,
+            "clinic_day": clinic_day
         }
         load_doctors_to_listbox()
         save_config()
@@ -119,21 +125,65 @@ def generate_schedule():
     _, num_days = monthrange(year, month)
 
     days = list(range(1, num_days + 1))
-    weekdays = ["", "", ""] + ["一", "二", "三", "四", "五", "六", "日"]
-    weekday_headers = [weekdays[(pd.Timestamp(year, month, day).dayofweek + 1) % 7 + 1] for day in days]
+    weekdays = ["一", "二", "三", "四", "五", "六", "日"]
+    weekday_headers = [weekdays[pd.Timestamp(year, month, day).dayofweek] for day in days]
 
     data = [
         ["", "公休", "积休"] + days,
-        ["", ""] + weekday_headers
+        ["", "", ""] + weekday_headers
     ]
 
     for doctor in doctor_data:
         row = [doctor['name'], doctor['public_holiday'], doctor['accumulated_holiday']] + [''] * num_days
+
+        # 1.处理非正常工作的情况
+        if doctor['status'] != "正常工作":
+            for day in days:
+                row[2 + day] = doctor['status']
+            data.append(row)
+            continue
+
         if doctor['next_shift_date'] and doctor['shift_interval'] > 0:
             next_shift_date = pd.Timestamp(doctor['next_shift_date'])
+
+            # 2.用工作日初始化所有日期
             for day in days:
-                if (pd.Timestamp(year, month, day) - next_shift_date).days % doctor['shift_interval'] == 0:
+                current_date = pd.Timestamp(year, month, day)
+                if current_date.weekday() < 5:
+                    row[2 + day] = "日"
+                else:
+                    row[2 + day] = "休"
+
+            # 3.值班日处理
+            for day in days:
+                current_date = pd.Timestamp(year, month, day)
+                if (current_date - next_shift_date).days % doctor['shift_interval'] == 0:
                     row[2 + day] = "值"
+                    if day < num_days:
+                        row[2 + day + 1] = "/"
+                    if current_date.weekday() == 5:  # Saturday
+                        if day + 2 <= num_days:
+                            row[2 + day + 2] = "周六调休"
+                    elif current_date.weekday() == 6:  # Sunday
+                        if day + 3 <= num_days:
+                            row[2 + day + 3] = "周日调休"
+
+            # 4.门诊日处理
+            for day in days:
+                current_date = pd.Timestamp(year, month, day)
+                if doctor['clinic_day'] == weekdays[current_date.weekday()]:
+                    if row[2 + day] == "日":
+                        row[2 + day] = "日/门"
+                    elif row[2 + day] == "值":
+                        row[2 + day] = "值/门"
+                    elif row[2 + day] == "/":
+                        row[2 + day] = "加/门"
+                    elif row[2 + day] == "休":
+                        row[2 + day] = "休/门"
+                    elif row[2 + day] == "周六调休" or row[2 + day] == "周日调休":
+                        row[2 + day] = "日/门"  # ？
+                    else:
+                        row[2 + day] += "/门"
         data.append(row)
 
     df = pd.DataFrame(data)
@@ -146,7 +196,7 @@ doctor_data = load_config()
 
 # 医生列表框
 doctor_listbox = tk.Listbox(root, width=80)
-doctor_listbox.grid(row=10, column=0, columnspan=2)
+doctor_listbox.grid(row=12, column=0, columnspan=2)
 
 # 医生输入框和按钮
 tk.Label(root, text="医生名字:").grid(row=2, column=0)
@@ -175,15 +225,23 @@ tk.Label(root, text="值班间隔 (天):").grid(row=7, column=0)
 shift_interval_entry = tk.Entry(root, width=30)
 shift_interval_entry.grid(row=7, column=1)
 
+tk.Label(root, text="门诊日:").grid(row=8, column=0)
+doctor_clinic_day_var = tk.StringVar()
+doctor_clinic_day_menu = ttk.Combobox(root, textvariable=doctor_clinic_day_var, width=27)
+doctor_clinic_day_menu['values'] = ["一", "二", "三", "四", "五", "六", "日"]
+doctor_clinic_day_menu.grid(row=8, column=1)
+
 add_button = tk.Button(root, text="添加医生", command=add_doctor)
-add_button.grid(row=8, column=0, columnspan=2)
+add_button.grid(row=9, column=0, columnspan=2)
 
 modify_button = tk.Button(root, text="修改医生", command=modify_doctor)
-modify_button.grid(row=9, column=0, columnspan=2)
+modify_button.grid(row=10, column=0, columnspan=2)
 
 generate_button = tk.Button(root, text="生成排班表", command=generate_schedule)
 generate_button.grid(row=11, column=0, columnspan=2)
 
+# 加载医生列表
 load_doctors_to_listbox()
 
+# 运行主窗口
 root.mainloop()
